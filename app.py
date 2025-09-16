@@ -2,37 +2,42 @@ import streamlit as st
 import requests
 import xml.etree.ElementTree as ET
 import pandas as pd
-import matplotlib.pyplot as plt
-from wordcloud import WordCloud
 from collections import Counter
 import re
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
+import matplotlib.pyplot as plt
+from wordcloud import WordCloud
 
-st.set_page_config(page_title="Medical Hot Topics Explorer", layout="wide")
+st.set_page_config(page_title="PubMed Relevance Ranker", layout="wide")
 
-st.title("📊 Medical Hot Topics Explorer")
-st.markdown("This tool fetches PubMed articles, ranks them, and detects **emerging hot topics** per medical area.")
+st.title("🔍 PubMed Relevance Ranker")
+st.markdown("This tool fetches articles from PubMed and ranks them based on their **potential relevance**, using only metadata from the PubMed XML.")
 
 # -------------------- Inputs --------------------
-st.sidebar.header("Search Configuration")
+st.header("Step 1: Customize the Search")
 
-# Área médica -> define query básica
-area = st.sidebar.selectbox(
-    "Select Medical Area",
-    ["Endocrinology", "Cardiology", "Oncology"]
-)
+default_query = '("Endocrinology" OR "Diabetes") AND 2024/10/01:2025/06/28[Date - Publication]'
+query = st.text_area("PubMed Search Query", value=default_query, height=100)
 
-query_map = {
-    "Endocrinology": '("Endocrinology" OR "Diabetes") AND 2024/01/01:2025/09/01[Date - Publication]',
-    "Cardiology": '("Cardiology" OR "Myocardial Infarction") AND 2024/01/01:2025/09/01[Date - Publication]',
-    "Oncology": '("Oncology" OR "Cancer") AND 2024/01/01:2025/09/01[Date - Publication]'
-}
-query = query_map[area]
+default_journals = "\n".join([
+    "N Engl J Med", "JAMA", "BMJ", "Lancet", "Nature", "Science", "Cell"
+])
+journal_input = st.text_area("High-Impact Journals (one per line)", value=default_journals, height=150)
+journals = [j.strip().lower() for j in journal_input.strip().split("\n") if j.strip()]
 
-max_results = st.sidebar.number_input("Max number of articles", min_value=50, max_value=1000, value=300, step=50)
+default_institutions = "\n".join([
+    "Harvard", "Oxford", "Mayo Clinic", "NIH", "Stanford",
+    "UCSF", "Yale", "Cambridge", "Karolinska", "Johns Hopkins"
+])
+inst_input = st.text_area("Renowned Institutions (one per line)", value=default_institutions, height=150)
+institutions = [i.strip().lower() for i in inst_input.strip().split("\n") if i.strip()]
 
-# -------------------- Run search --------------------
-if st.sidebar.button("🔎 Run PubMed Search"):
+max_results = st.number_input("Max number of articles to fetch", min_value=10, max_value=1000, value=250, step=10)
+
+hot_keywords = ["glp-1", "semaglutide", "tirzepatide", "ai", "machine learning", "telemedicine"]
+
+# -------------------- Run PubMed Search --------------------
+if st.button("🔎 Run PubMed Search"):
     with st.spinner("Fetching articles..."):
 
         # Step 1: Use esearch to get PMIDs
@@ -57,9 +62,47 @@ if st.sidebar.button("🔎 Run PubMed Search"):
             "id": ",".join(id_list),
             "retmode": "xml"
         }
-        response = requests.get(efetch_url, params=params, timeout=30)
+        response = requests.get(efetch_url, params=params, timeout=20)
 
+        parsed_ok = 0
+        parsed_fail = 0
         records = []
+
+        def score_article(article):
+            score = 0
+            reasons = []
+
+            journal = article.findtext(".//Journal/Title", "").lower()
+            if any(j in journal for j in journals):
+                score += 2
+                reasons.append("High-impact journal (+2)")
+
+            pub_types = [pt.text.lower() for pt in article.findall(".//PublicationType")]
+            valued_types = ["randomized controlled trial", "systematic review", "meta-analysis", "guideline", "practice guideline"]
+            if any(pt in valued_types for pt in pub_types):
+                score += 2
+                reasons.append("Valued publication type (+2)")
+
+            authors = article.findall(".//Author")
+            if len(authors) >= 5:
+                score += 1
+                reasons.append("Multiple authors (+1)")
+
+            affiliations = [aff.text.lower() for aff in article.findall(".//AffiliationInfo/Affiliation") if aff is not None]
+            if any(inst in aff for aff in affiliations for inst in institutions):
+                score += 1
+                reasons.append("Prestigious institution (+1)")
+
+            title = article.findtext(".//ArticleTitle", "").lower()
+            if any(kw in title for kw in hot_keywords):
+                score += 2
+                reasons.append("Hot keyword in title (+2)")
+
+            if article.find(".//GrantList") is not None:
+                score += 2
+                reasons.append("Has research funding (+2)")
+
+            return score, "; ".join(reasons)
 
         try:
             root = ET.fromstring(response.content)
@@ -68,74 +111,50 @@ if st.sidebar.button("🔎 Run PubMed Search"):
                 try:
                     pmid = article.findtext(".//PMID")
                     title = article.findtext(".//ArticleTitle", "")
-                    abstract = " ".join([abst.text for abst in article.findall(".//AbstractText") if abst is not None])
                     link = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
                     journal = article.findtext(".//Journal/Title", "")
-                    year = article.findtext(".//PubDate/Year") or "N/A"
-
+                    date = article.findtext(".//PubDate/Year") or article.findtext(".//PubDate/MedlineDate") or "N/A"
+                    score, reason = score_article(article)
                     records.append({
-                        "PMID": pmid,
                         "Title": title,
-                        "Abstract": abstract,
                         "Link": link,
                         "Journal": journal,
-                        "Year": year
+                        "Date": date,
+                        "Score": score,
+                        "Why": reason
                     })
+                    parsed_ok += 1
                 except Exception:
-                    pass
+                    parsed_fail += 1
         except Exception:
             st.error("Failed to parse XML from PubMed.")
 
-        df = pd.DataFrame(records)
+        df = pd.DataFrame(records).sort_values("Score", ascending=False)
 
-        st.success(f"Fetched {len(df)} articles for {area}.")
+        st.success(f"Found {len(id_list)} PMIDs. Successfully parsed {parsed_ok} articles. Failed to parse {parsed_fail}.")
 
         if not df.empty:
-            # -------------------- PART 1: Keyword Frequency --------------------
-            st.header("📌 Keyword Frequency Analysis")
+            # -------------------- Show Articles --------------------
+            st.dataframe(df[["Title", "Journal", "Date", "Score", "Why"]], use_container_width=True)
+            csv = df.to_csv(index=False)
+            st.download_button("⬇️ Download CSV", data=csv, file_name="ranked_pubmed_results.csv", mime="text/csv")
 
-            text_data = " ".join(df["Title"].astype(str).tolist() + df["Abstract"].astype(str).tolist())
-            text_data = text_data.lower()
+            # -------------------- Hot Topics Analysis --------------------
+            st.header("🔥 Hot Topics Analysis")
+
+            text_data = " ".join(df["Title"].astype(str).tolist()).lower()
             words = re.findall(r"\b[a-z]{3,}\b", text_data)
-
             stop_words = set(ENGLISH_STOP_WORDS)
             words = [w for w in words if w not in stop_words]
 
             freq = Counter(words)
             top_terms = freq.most_common(30)
 
-            freq_df = pd.DataFrame(top_terms, columns=["Term", "Frequency"])
-            st.dataframe(freq_df, use_container_width=True)
+            st.subheader("Top 30 Frequent Terms")
+            st.dataframe(pd.DataFrame(top_terms, columns=["Term", "Frequency"]))
 
-            # Wordcloud
-            st.subheader("Word Cloud of Most Frequent Terms")
             wc = WordCloud(width=800, height=400, background_color="white").generate_from_frequencies(freq)
             fig, ax = plt.subplots(figsize=(10, 5))
             ax.imshow(wc, interpolation="bilinear")
             ax.axis("off")
             st.pyplot(fig)
-
-            # -------------------- PART 2: Temporal Trends --------------------
-            st.header("📈 Temporal Trends of Top Terms")
-
-            df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
-            df = df.dropna(subset=["Year"])
-
-            trend_terms = [t[0] for t in top_terms[:5]]  # top 5 terms
-            trend_data = {term: [] for term in trend_terms}
-            years = sorted(df["Year"].unique())
-
-            for year in years:
-                year_text = " ".join(
-                    df[df["Year"] == year]["Title"].astype(str).tolist() +
-                    df[df["Year"] == year]["Abstract"].astype(str).tolist()
-                ).lower()
-                for term in trend_terms:
-                    trend_data[term].append(year_text.count(term))
-
-            trend_df = pd.DataFrame(trend_data, index=years)
-            st.line_chart(trend_df)
-
-            # -------------------- PART 3: Show Articles --------------------
-            st.header("📰 Articles Retrieved")
-            st.dataframe(df[["Title", "Journal", "Year", "Link"]], use_container_width=True)
