@@ -6,16 +6,11 @@ import matplotlib.pyplot as plt
 from wordcloud import WordCloud
 from collections import Counter
 import re
-import nltk
-
-# Download stopwords (só precisa na primeira vez)
-nltk.download("stopwords")
-from nltk.corpus import stopwords
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 
 st.set_page_config(page_title="Medical Hot Topics Explorer", layout="wide")
 
 st.title("📊 Medical Hot Topics Explorer")
-
 st.markdown("This tool fetches PubMed articles, ranks them, and detects **emerging hot topics** per medical area.")
 
 # -------------------- Inputs --------------------
@@ -51,6 +46,10 @@ if st.sidebar.button("🔎 Run PubMed Search"):
         r = requests.get(search_url, params=search_params)
         id_list = r.json()["esearchresult"].get("idlist", [])
 
+        if not id_list:
+            st.warning("No articles found for this query.")
+            st.stop()
+
         # Step 2: Use efetch in batch
         efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
         params = {
@@ -60,7 +59,6 @@ if st.sidebar.button("🔎 Run PubMed Search"):
         }
         response = requests.get(efetch_url, params=params, timeout=30)
 
-        parsed_ok = 0
         records = []
 
         try:
@@ -83,7 +81,6 @@ if st.sidebar.button("🔎 Run PubMed Search"):
                         "Journal": journal,
                         "Year": year
                     })
-                    parsed_ok += 1
                 except Exception:
                     pass
         except Exception:
@@ -101,7 +98,7 @@ if st.sidebar.button("🔎 Run PubMed Search"):
             text_data = text_data.lower()
             words = re.findall(r"\b[a-z]{3,}\b", text_data)
 
-            stop_words = set(stopwords.words("english"))
+            stop_words = set(ENGLISH_STOP_WORDS)
             words = [w for w in words if w not in stop_words]
 
             freq = Counter(words)
@@ -121,24 +118,23 @@ if st.sidebar.button("🔎 Run PubMed Search"):
             # -------------------- PART 2: Temporal Trends --------------------
             st.header("📈 Temporal Trends of Top Terms")
 
-            if "Year" in df.columns:
-                df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
-                df = df.dropna(subset=["Year"])
+            df["Year"] = pd.to_numeric(df["Year"], errors="coerce")
+            df = df.dropna(subset=["Year"])
 
-                trend_terms = [t[0] for t in top_terms[:5]]  # top 5 terms
-                trend_data = {term: [] for term in trend_terms}
-                years = sorted(df["Year"].unique())
+            trend_terms = [t[0] for t in top_terms[:5]]  # top 5 terms
+            trend_data = {term: [] for term in trend_terms}
+            years = sorted(df["Year"].unique())
 
-                for year in years:
-                    year_text = " ".join(
-                        df[df["Year"] == year]["Title"].astype(str).tolist() +
-                        df[df["Year"] == year]["Abstract"].astype(str).tolist()
-                    ).lower()
-                    for term in trend_terms:
-                        trend_data[term].append(year_text.count(term))
+            for year in years:
+                year_text = " ".join(
+                    df[df["Year"] == year]["Title"].astype(str).tolist() +
+                    df[df["Year"] == year]["Abstract"].astype(str).tolist()
+                ).lower()
+                for term in trend_terms:
+                    trend_data[term].append(year_text.count(term))
 
-                trend_df = pd.DataFrame(trend_data, index=years)
-                st.line_chart(trend_df)
+            trend_df = pd.DataFrame(trend_data, index=years)
+            st.line_chart(trend_df)
 
             # -------------------- PART 3: Show Articles --------------------
             st.header("📰 Articles Retrieved")
