@@ -7,6 +7,8 @@ import re
 from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
+import os
+import subprocess
 
 st.set_page_config(page_title="PubMed Relevance Ranker", layout="wide")
 
@@ -162,12 +164,21 @@ if st.button("🔎 Run PubMed Search"):
             # -------------------- Advanced Hot Topics --------------------
             st.header("🧬 Advanced Hot Topics Analysis")
 
+            MODEL_NAME = "en_core_sci_sm"
+            nlp = None
+
+            if not os.path.exists(f"./{MODEL_NAME}"):
+                st.info("Downloading SciSpacy model (this may take ~1 min)...")
+                subprocess.run([
+                    "pip", "install",
+                    "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_sm-0.5.1.tar.gz"
+                ])
+
             try:
                 import spacy
-                nlp = spacy.load("en_core_sci_sm")
-            except Exception:
-                st.warning("SciSpacy model not installed. Install en_core_sci_sm to enable Advanced Hot Topics.")
-                nlp = None
+                nlp = spacy.load(MODEL_NAME)
+            except Exception as e:
+                st.warning(f"Failed to load SciSpacy model: {e}")
 
             if nlp:
                 text_data = " ".join(df["Title"].astype(str).tolist())
