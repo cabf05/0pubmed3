@@ -158,3 +158,49 @@ if st.button("🔎 Run PubMed Search"):
             ax.imshow(wc, interpolation="bilinear")
             ax.axis("off")
             st.pyplot(fig)
+
+            # -------------------- Advanced Hot Topics --------------------
+            st.header("🧬 Advanced Hot Topics Analysis")
+
+            try:
+                import spacy
+                nlp = spacy.load("en_core_sci_sm")
+            except Exception:
+                st.warning("SciSpacy model not installed. Install en_core_sci_sm to enable Advanced Hot Topics.")
+                nlp = None
+
+            if nlp:
+                text_data = " ".join(df["Title"].astype(str).tolist())
+                doc = nlp(text_data)
+
+                # Extract biomedical entities
+                entities = [ent.text.lower() for ent in doc.ents]
+
+                # Bigrams / Trigrams with CountVectorizer
+                from sklearn.feature_extraction.text import CountVectorizer
+                generic_med_terms = set([
+                    "study", "patient", "patients", "group", "results", "trial", "clinical", 
+                    "analysis", "effect", "treatment", "observed", "report", "case", "cohort"
+                ])
+
+                entity_text = " ".join(entities)
+                vectorizer = CountVectorizer(stop_words='english', ngram_range=(1,3), max_features=100)
+                X = vectorizer.fit_transform([entity_text])
+                terms = vectorizer.get_feature_names_out()
+                freq = X.toarray().sum(axis=0)
+
+                # Filter generic medical terms
+                filtered_terms = [(term, count) for term, count in zip(terms, freq) if term not in generic_med_terms]
+
+                top_terms = sorted(filtered_terms, key=lambda x: x[1], reverse=True)[:30]
+
+                st.subheader("Top 30 Biomedical Terms (NER + Ngrams)")
+                st.dataframe(pd.DataFrame(top_terms, columns=["Term", "Frequency"]))
+
+                if top_terms:
+                    term_freq_dict = dict(top_terms)
+                    wc = WordCloud(width=800, height=400, background_color="white").generate_from_frequencies(term_freq_dict)
+                    fig, ax = plt.subplots(figsize=(10, 5))
+                    ax.imshow(wc, interpolation="bilinear")
+                    ax.axis("off")
+                    st.pyplot(fig)
