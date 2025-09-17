@@ -165,7 +165,7 @@ if st.button("🔎 Run Analysis"):
 
         try:
             import spacy
-            nlp = spacy.load("en_core_web_sm")
+            nlp = spacy.load("en_ner_bc5cdr_md")
 
             doc = nlp(text_data)
             entities = [ent.text.lower() for ent in doc.ents]
