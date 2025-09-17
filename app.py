@@ -2,23 +2,19 @@ import streamlit as st
 import requests
 import xml.etree.ElementTree as ET
 import pandas as pd
-from collections import Counter
-import re
-from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS
 import matplotlib.pyplot as plt
 from wordcloud import WordCloud
-import os
-import subprocess
+from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS, CountVectorizer
 
-st.set_page_config(page_title="PubMed Relevance Ranker", layout="wide")
-
-st.title("🔍 PubMed Relevance Ranker")
-st.markdown("This tool fetches articles from PubMed and ranks them based on their **potential relevance**, using only metadata from the PubMed XML.")
+# -------------------- Streamlit Config --------------------
+st.set_page_config(page_title="Medical Hot Topics Explorer", layout="wide")
+st.title("🔍 Medical Hot Topics Explorer")
+st.markdown("This tool fetches PubMed articles, ranks them, and detects emerging hot topics per medical area.")
 
 # -------------------- Inputs --------------------
 st.header("Step 1: Customize the Search")
 
-default_query = '("Endocrinology" OR "Diabetes") AND 2024/10/01:2025/06/28[Date - Publication]'
+default_query = '("Endocrinology" OR "Diabetes") AND 2024/10/01:2025/09/01[Date - Publication]'
 query = st.text_area("PubMed Search Query", value=default_query, height=100)
 
 default_journals = "\n".join([
@@ -34,15 +30,15 @@ default_institutions = "\n".join([
 inst_input = st.text_area("Renowned Institutions (one per line)", value=default_institutions, height=150)
 institutions = [i.strip().lower() for i in inst_input.strip().split("\n") if i.strip()]
 
-max_results = st.number_input("Max number of articles to fetch", min_value=10, max_value=1000, value=250, step=10)
+max_results = st.number_input("Max number of articles to fetch", min_value=10, max_value=500, value=200, step=10)
 
 hot_keywords = ["glp-1", "semaglutide", "tirzepatide", "ai", "machine learning", "telemedicine"]
 
-# -------------------- Run PubMed Search --------------------
-if st.button("🔎 Run PubMed Search"):
-    with st.spinner("Fetching articles..."):
+# -------------------- PubMed Fetch --------------------
+if st.button("🔎 Run Analysis"):
+    with st.spinner("Fetching articles from PubMed..."):
 
-        # Step 1: Use esearch to get PMIDs
+        # Step 1: Get PMIDs
         search_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
         search_params = {
             "db": "pubmed",
@@ -53,18 +49,14 @@ if st.button("🔎 Run PubMed Search"):
         r = requests.get(search_url, params=search_params)
         id_list = r.json()["esearchresult"].get("idlist", [])
 
-        if not id_list:
-            st.warning("No articles found for this query.")
-            st.stop()
-
-        # Step 2: Use efetch in batch
+        # Step 2: Fetch articles
         efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
         params = {
             "db": "pubmed",
             "id": ",".join(id_list),
             "retmode": "xml"
         }
-        response = requests.get(efetch_url, params=params, timeout=20)
+        response = requests.get(efetch_url, params=params, timeout=30)
 
         parsed_ok = 0
         parsed_fail = 0
@@ -136,82 +128,73 @@ if st.button("🔎 Run PubMed Search"):
         st.success(f"Found {len(id_list)} PMIDs. Successfully parsed {parsed_ok} articles. Failed to parse {parsed_fail}.")
 
         if not df.empty:
-            # -------------------- Show Articles --------------------
+            st.subheader("Ranked Articles")
             st.dataframe(df[["Title", "Journal", "Date", "Score", "Why"]], use_container_width=True)
             csv = df.to_csv(index=False)
             st.download_button("⬇️ Download CSV", data=csv, file_name="ranked_pubmed_results.csv", mime="text/csv")
+        else:
+            st.warning("No valid articles found to display.")
 
-            # -------------------- Hot Topics Analysis --------------------
-            st.header("🔥 Hot Topics Analysis")
+        # -------------------- Word Cloud --------------------
+        st.header("☁️ Word Cloud of Titles")
 
-            text_data = " ".join(df["Title"].astype(str).tolist()).lower()
-            words = re.findall(r"\b[a-z]{3,}\b", text_data)
-            stop_words = set(ENGLISH_STOP_WORDS)
-            words = [w for w in words if w not in stop_words]
+        text_data = " ".join(df["Title"].astype(str).tolist())
+        stop_words = set(ENGLISH_STOP_WORDS)
+        wordcloud = WordCloud(width=800, height=400, stopwords=stop_words, background_color="white").generate(text_data)
 
-            freq = Counter(words)
-            top_terms = freq.most_common(30)
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.imshow(wordcloud, interpolation="bilinear")
+        ax.axis("off")
+        st.pyplot(fig)
 
-            st.subheader("Top 30 Frequent Terms")
+        # -------------------- Frequency Analysis --------------------
+        st.header("📊 Keyword Frequency")
+        vectorizer = CountVectorizer(stop_words='english', max_features=30)
+        X = vectorizer.fit_transform(df["Title"].astype(str).tolist())
+        freqs = zip(vectorizer.get_feature_names_out(), X.toarray().sum(axis=0))
+        freq_df = pd.DataFrame(freqs, columns=["Keyword", "Frequency"]).sort_values("Frequency", ascending=False)
+
+        st.dataframe(freq_df, use_container_width=True)
+        fig2, ax2 = plt.subplots()
+        ax2.bar(freq_df["Keyword"], freq_df["Frequency"])
+        plt.xticks(rotation=45, ha="right")
+        st.pyplot(fig2)
+
+        # -------------------- Advanced Hot Topics (SciSpacy) --------------------
+        st.header("🧬 Advanced Hot Topics Analysis")
+
+        try:
+            import spacy
+            nlp = spacy.load("en_core_sci_sm")
+
+            doc = nlp(text_data)
+            entities = [ent.text.lower() for ent in doc.ents]
+
+            # Generic terms to filter
+            generic_med_terms = set([
+                "study", "patient", "patients", "group", "results", "trial", "clinical",
+                "analysis", "effect", "treatment", "observed", "report", "case", "cohort"
+            ])
+
+            entity_text = " ".join(entities)
+            vectorizer = CountVectorizer(stop_words='english', ngram_range=(1,3), max_features=100)
+            X = vectorizer.fit_transform([entity_text])
+            terms = vectorizer.get_feature_names_out()
+            freq = X.toarray().sum(axis=0)
+
+            filtered_terms = [(term, count) for term, count in zip(terms, freq) if term not in generic_med_terms]
+            top_terms = sorted(filtered_terms, key=lambda x: x[1], reverse=True)[:30]
+
+            st.subheader("Top 30 Biomedical Terms (NER + Ngrams)")
             st.dataframe(pd.DataFrame(top_terms, columns=["Term", "Frequency"]))
 
-            wc = WordCloud(width=800, height=400, background_color="white").generate_from_frequencies(freq)
-            fig, ax = plt.subplots(figsize=(10, 5))
-            ax.imshow(wc, interpolation="bilinear")
-            ax.axis("off")
-            st.pyplot(fig)
+            if top_terms:
+                term_freq_dict = dict(top_terms)
+                wc = WordCloud(width=800, height=400, background_color="white").generate_from_frequencies(term_freq_dict)
+                fig3, ax3 = plt.subplots(figsize=(10, 5))
+                ax3.imshow(wc, interpolation="bilinear")
+                ax3.axis("off")
+                st.pyplot(fig3)
 
-            # -------------------- Advanced Hot Topics --------------------
-            st.header("🧬 Advanced Hot Topics Analysis")
-
-            MODEL_NAME = "en_core_sci_sm"
-            nlp = None
-
-            if not os.path.exists(f"./{MODEL_NAME}"):
-                st.info("Downloading SciSpacy model (this may take ~1 min)...")
-                subprocess.run([
-                    "pip", "install",
-                    "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.1/en_core_sci_sm-0.5.1.tar.gz"
-                ])
-
-            try:
-                import spacy
-                nlp = spacy.load(MODEL_NAME)
-            except Exception as e:
-                st.warning(f"Failed to load SciSpacy model: {e}")
-
-            if nlp:
-                text_data = " ".join(df["Title"].astype(str).tolist())
-                doc = nlp(text_data)
-
-                # Extract biomedical entities
-                entities = [ent.text.lower() for ent in doc.ents]
-
-                # Bigrams / Trigrams with CountVectorizer
-                from sklearn.feature_extraction.text import CountVectorizer
-                generic_med_terms = set([
-                    "study", "patient", "patients", "group", "results", "trial", "clinical", 
-                    "analysis", "effect", "treatment", "observed", "report", "case", "cohort"
-                ])
-
-                entity_text = " ".join(entities)
-                vectorizer = CountVectorizer(stop_words='english', ngram_range=(1,3), max_features=100)
-                X = vectorizer.fit_transform([entity_text])
-                terms = vectorizer.get_feature_names_out()
-                freq = X.toarray().sum(axis=0)
-
-                # Filter generic medical terms
-                filtered_terms = [(term, count) for term, count in zip(terms, freq) if term not in generic_med_terms]
-
-                top_terms = sorted(filtered_terms, key=lambda x: x[1], reverse=True)[:30]
-
-                st.subheader("Top 30 Biomedical Terms (NER + Ngrams)")
-                st.dataframe(pd.DataFrame(top_terms, columns=["Term", "Frequency"]))
-
-                if top_terms:
-                    term_freq_dict = dict(top_terms)
-                    wc = WordCloud(width=800, height=400, background_color="white").generate_from_frequencies(term_freq_dict)
-                    fig, ax = plt.subplots(figsize=(10, 5))
-                    ax.imshow(wc, interpolation="bilinear")
-                    ax.axis("off")
-                    st.pyplot(fig)
+        except Exception as e:
+            st.warning(f"Could not run advanced analysis: {e}")
